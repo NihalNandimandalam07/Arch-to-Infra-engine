@@ -52,7 +52,8 @@ Serverless, containers and edge/data services come in later phases. The IR schem
 | D8 | Python **3.12** for all engine code | Strands and AgentCore require 3.10+. |
 | D9 | **Claude Sonnet 5** (`us.anthropic.claude-sonnet-5`) for extraction and all agents, set per stage in config | The best model the org's SCP allows in this account (see Q7). The model ID is configurable so we can move to Claude Opus 5.5 if the SCP is relaxed. |
 | D10 | Knowledge Base vector store: **Amazon S3 Vectors** | Pay-per-use, with no idle minimum cost. OpenSearch Serverless is documented as the alternative for the RSA. |
-| D11 | OPA library starts from the **starter policy set** (§16 Q5) | No organisation-specific baseline yet. The library is extensible per client. |
+| D11 | OPA library starts from the **starter policy set** (§17 Q5) | No organisation-specific baseline yet. The library is extensible per client. |
+| D12 | **Default naming and tagging convention** (§16), defined as data in `config/naming.yaml` | No organisation standard yet. Names are generated deterministically by the Assembly tool, never chosen by the LLM. Replacing the standard means editing one file. |
 
 ---
 
@@ -255,6 +256,7 @@ Every tool is plain Python. It takes a slice of the IR plus constraints and retu
 | Assembly | none (consumes the other tools' specs) | none |
 
 The Assembly tool:
+- generates every resource name and the mandatory tags from `config/naming.yaml` (§16);
 - wires module outputs to inputs using the dependency DAG;
 - renders `versions.tf` (pinned providers), `providers.tf` (region and `default_tags`), `variables.tf`, `main.tf` and `outputs.tf` with Jinja2 templates;
 - runs `terraform fmt`.
@@ -342,6 +344,7 @@ src/
   notifications/       Email rendering, approval page
 modules/               Approved modules (each with module.json)
 policies/              OPA/Rego + metadata + checkov config
+config/                naming.yaml (naming and tagging convention)
 samples/               Engineer-provided diagrams (+ expected IR)
 scripts/               a2i CLI, publish_modules.py
 tests/                 Unit + golden tests (diagram → expected IR → expected plan)
@@ -364,7 +367,74 @@ docs/                  This design, runbook, playbook
 
 ---
 
-## 16. Open questions
+## 16. Naming and tagging convention
+
+This default applies until an organisation standard is supplied (D12). It is defined as data in `config/naming.yaml`, which is built with the modules in Weeks 2–3. Three things follow it:
+- the **Assembly tool** renders every name from it;
+- **approved modules** validate the `name` input they receive;
+- an **OPA policy** rejects any plan whose names or tags don't follow it.
+
+### 16.1 Generated (workload) resources
+
+**Base pattern:** `{prefix}-{env}-{component}-{type}`. Everything is lowercase with hyphens only. Putting the type last means resources sort by application, then environment.
+
+| Part | Source | Example |
+|---|---|---|
+| `prefix` | `deployment.name_prefix`: 2–12 chars, no leading, trailing or double hyphens | `shop` |
+| `env` | `deployment.environment` | `dev` |
+| `component` | The IR resource `id`, with type words removed and `_` turned into `-`. Omitted when only one of that type exists. | `alb_web` → `web` |
+| `type` | Fixed code: `vpc` `snet` `igw` `nat` `rt` `alb` `tg` `ec2` `asg` `lt` `rds` `sg` `role` `kms` `log` `alarm` | `alb` |
+
+Examples from `src/ir/examples/three_tier_web.json`:
+
+| IR id | AWS name |
+|---|---|
+| `vpc_main` | `shop-dev-main-vpc` |
+| `subnet_public_a` | `shop-dev-public-a-snet` |
+| `igw` | `shop-dev-igw` |
+| `alb_web` | `shop-dev-web-alb` |
+| `asg_app` | `shop-dev-app-asg`, with launch template `shop-dev-app-lt` |
+| `rds_main` | `shop-dev-main-rds` |
+| inferred app security group / role | `shop-dev-app-sg` / `shop-dev-app-role` |
+
+**Exceptions** where AWS rules require a different shape:
+
+| Resource | Pattern | Example | Reason |
+|---|---|---|---|
+| S3 bucket | `{prefix}-{env}-{component}-{account_id}-{region}` | `shop-dev-assets-123456789012-us-east-1` | Bucket names are globally unique |
+| KMS key | alias `alias/{prefix}-{env}-{component}` | `alias/shop-dev-data` | Keys are named only through aliases |
+| CloudWatch log group | `/{prefix}/{env}/{component}` | `/shop/dev/app` | Path-style convention |
+| EC2 instance | `Name` tag only | `shop-dev-bastion-ec2` | Instances have no name field |
+
+**Length limits.** If a name exceeds its AWS limit (ALB and target group 32 chars; IAM role 64; RDS and S3 63), the `component` part is truncated and a 4-character hash of the full untruncated name is appended, e.g. `shop-prod-custo-7f3a-alb`. This is deterministic: the same input always gives the same name, so re-runs never rename resources.
+
+### 16.2 Mandatory tags
+
+The engine sets these on every generated resource. Users may add more tags through `deployment.tags`, but cannot override these. The IR schema rejects these keys and any `aws:`-prefixed key in `deployment.tags`.
+
+| Tag | Value | Purpose |
+|---|---|---|
+| `Name` | the generated name | Console display |
+| `Application` | `prefix` | Cost allocation |
+| `Environment` | `env` | Cost allocation, environment-specific policy |
+| `Owner` | `deployment.owner` (required) | Accountability |
+| `CostCenter` | `deployment.tags.CostCenter` (required) | Chargeback |
+| `ManagedBy` | `terraform` | Don't edit by hand |
+| `GeneratedBy` | `arch-to-infra-engine` | Identifies engine-built infrastructure |
+| `A2IJobId` | job ID | Links the resource to its diagram, IR, plan and approval record |
+| `A2IResourceId` | IR resource id | Links the resource to the exact element on the diagram |
+
+### 16.3 The engine's own resources
+
+These use the same scheme with prefix `a2i` and no `env`, since the engine runs once per account. Examples:
+- `a2i-tfstate-<account>-<region>` (existing state bucket);
+- `a2i-artifacts-<account>-<region>`;
+- `a2i-jobs` (DynamoDB);
+- `a2i-extract-fn` (Lambda).
+
+---
+
+## 17. Open questions
 
 | # | Question | Proposed default |
 |---|---|---|
