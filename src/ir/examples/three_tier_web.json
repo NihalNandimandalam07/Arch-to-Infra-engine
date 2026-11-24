@@ -1,0 +1,108 @@
+{
+  "ir_version": "1.0",
+  "job_id": "job-01example0001",
+  "stage": "extracted",
+  "source": {
+    "diagram_uri": "s3://a2i-artifacts-000000000000/jobs/job-01example0001/input/diagram.png",
+    "diagram_sha256": "3b4c2f5e8a1d7c9b0e6f4a2d8c1b5e7f9a3c6d0b2e4f8a1c7d9b3e5f0a2c4d6e",
+    "media_type": "image/png",
+    "page": 1,
+    "extracted_at": "2026-11-24T15:00:00Z",
+    "extraction_model": "bedrock:<configured-model-id>"
+  },
+  "deployment": {
+    "region": "us-east-1",
+    "environment": "dev",
+    "name_prefix": "shop",
+    "availability_zones": 2,
+    "owner": "platform-team",
+    "tags": { "Application": "shop", "CostCenter": "1234" }
+  },
+  "groups": [
+    { "id": "aws_region", "kind": "region", "label": "us-east-1" },
+    { "id": "az_a", "kind": "availability_zone", "label": "AZ A", "parent": "aws_region" },
+    { "id": "az_b", "kind": "availability_zone", "label": "AZ B", "parent": "aws_region" }
+  ],
+  "resources": [
+    {
+      "id": "users", "type": "external_actor", "label": "Internet users", "origin": "diagram", "confidence": 0.98,
+      "properties": { "kind": "internet_users" },
+      "evidence": { "bbox": [0.02, 0.40, 0.06, 0.10], "text": "Users" }
+    },
+    {
+      "id": "vpc_main", "type": "vpc", "label": "VPC 10.0.0.0/16", "origin": "diagram", "confidence": 0.95,
+      "parent": "aws_region",
+      "properties": { "cidr": "10.0.0.0/16" },
+      "evidence": { "bbox": [0.15, 0.10, 0.80, 0.80], "text": "VPC 10.0.0.0/16" }
+    },
+    {
+      "id": "igw", "type": "internet_gateway", "label": "Internet Gateway", "origin": "diagram", "confidence": 0.93,
+      "parent": "vpc_main", "properties": {}
+    },
+    {
+      "id": "subnet_public_a", "type": "subnet", "label": "Public subnet A", "origin": "diagram", "confidence": 0.90,
+      "parent": "vpc_main", "groups": ["az_a"],
+      "properties": { "tier": "public", "cidr": "10.0.0.0/24", "availability_zone": "us-east-1a" }
+    },
+    {
+      "id": "subnet_app_a", "type": "subnet", "label": "Private app subnet A", "origin": "diagram", "confidence": 0.88,
+      "parent": "vpc_main", "groups": ["az_a"],
+      "properties": { "tier": "private_app", "cidr": "10.0.10.0/24", "availability_zone": "us-east-1a" }
+    },
+    {
+      "id": "subnet_data_a", "type": "subnet", "label": "Private data subnet A", "origin": "diagram", "confidence": 0.88,
+      "parent": "vpc_main", "groups": ["az_a"],
+      "properties": { "tier": "private_data", "cidr": "10.0.20.0/24", "availability_zone": "us-east-1a" }
+    },
+    {
+      "id": "nat_a", "type": "nat_gateway", "label": "NAT Gateway", "origin": "diagram", "confidence": 0.85,
+      "parent": "subnet_public_a", "properties": {}
+    },
+    {
+      "id": "alb_web", "type": "alb", "label": "Application Load Balancer", "origin": "diagram", "confidence": 0.96,
+      "parent": "vpc_main",
+      "properties": { "scheme": "internet-facing", "listeners": [{ "port": 443, "protocol": "HTTPS" }] }
+    },
+    {
+      "id": "asg_app", "type": "autoscaling_group", "label": "App servers (Auto Scaling)", "origin": "diagram", "confidence": 0.82,
+      "parent": "subnet_app_a",
+      "properties": { "instance_type": "t3.medium", "min_size": 2, "max_size": 4, "os": "amazon-linux-2023" },
+      "evidence": { "bbox": [0.45, 0.35, 0.12, 0.20], "text": "EC2 Auto Scaling t3.medium" }
+    },
+    {
+      "id": "rds_main", "type": "rds_instance", "label": "Amazon RDS PostgreSQL", "origin": "diagram", "confidence": 0.90,
+      "parent": "subnet_data_a",
+      "properties": { "engine": "postgres", "multi_az": true }
+    },
+    {
+      "id": "s3_assets", "type": "s3_bucket", "label": "Static assets", "origin": "diagram", "confidence": 0.80,
+      "parent": "aws_region",
+      "properties": { "purpose": "static_assets" }
+    },
+    {
+      "id": "unknown_1", "type": "unknown", "label": "Unrecognized icon near app tier", "origin": "diagram", "confidence": 0.30,
+      "parent": "subnet_app_a",
+      "properties": { "icon_description": "Red hexagon icon with label 'cache'" }
+    }
+  ],
+  "links": [
+    { "id": "l_users_alb", "from": "users", "to": "alb_web", "kind": "traffic", "protocol": "https", "port": 443, "origin": "diagram", "confidence": 0.95 },
+    { "id": "l_alb_app", "from": "alb_web", "to": "asg_app", "kind": "traffic", "protocol": "http", "port": 8080, "origin": "diagram", "confidence": 0.75, "label": "8080" },
+    { "id": "l_app_db", "from": "asg_app", "to": "rds_main", "kind": "data", "protocol": "postgres", "port": 5432, "origin": "diagram", "confidence": 0.90 },
+    { "id": "l_app_s3", "from": "asg_app", "to": "s3_assets", "kind": "data", "protocol": "https", "origin": "diagram", "confidence": 0.70 }
+  ],
+  "questions": [
+    {
+      "id": "q_unknown_1", "severity": "blocking", "related_ids": ["unknown_1"],
+      "text": "An icon labelled 'cache' in the app tier was not recognized. ElastiCache is not in PoC scope. Remove it, or confirm it is part of the app servers?",
+      "options": ["Remove", "Part of app servers", "Keep as out-of-scope note"],
+      "answer": null
+    },
+    {
+      "id": "q_az_b", "severity": "advisory", "related_ids": ["subnet_public_a", "subnet_app_a", "subnet_data_a"],
+      "text": "Only AZ A subnets are drawn, but deployment requests 2 AZs. Mirror the subnets into AZ B?",
+      "suggested_answer": "Yes, mirror subnets into us-east-1b with CIDRs 10.0.1.0/24, 10.0.11.0/24, 10.0.21.0/24",
+      "answer": null
+    }
+  ]
+}
