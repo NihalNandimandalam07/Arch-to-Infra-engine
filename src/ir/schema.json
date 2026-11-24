@@ -53,17 +53,33 @@
     "deployment": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["region", "environment", "name_prefix", "tags"],
+      "required": ["region", "environment", "name_prefix", "owner", "tags"],
       "properties": {
         "region": { "type": "string", "pattern": "^[a-z]{2}(-gov)?-[a-z]+-[0-9]$" },
         "environment": { "enum": ["dev", "test", "prod"] },
-        "name_prefix": { "type": "string", "pattern": "^[a-z][a-z0-9-]{1,20}$" },
+        "name_prefix": {
+          "description": "Application/workload prefix for generated resource names (see DESIGN.md naming convention). Kept short so names fit AWS limits (e.g. ALB 32 chars).",
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 12,
+          "pattern": "^[a-z][a-z0-9]*(-[a-z0-9]+)*$"
+        },
         "availability_zones": { "type": "integer", "minimum": 1, "maximum": 3, "default": 2 },
-        "owner": { "type": "string", "maxLength": 128 },
+        "owner": { "type": "string", "minLength": 1, "maxLength": 128 },
         "tags": {
+          "description": "Extra tags. CostCenter is required. Tags the engine sets itself (Name, Application, Environment, Owner, ManagedBy, GeneratedBy, A2IJobId, A2IResourceId) and aws:-prefixed keys may not be supplied.",
           "type": "object",
-          "propertyNames": { "pattern": "^[A-Za-z0-9 _.:/=+@-]{1,128}$" },
-          "additionalProperties": { "type": "string", "maxLength": 256 }
+          "required": ["CostCenter"],
+          "propertyNames": {
+            "pattern": "^[A-Za-z0-9 _.:/=+@-]{1,128}$",
+            "not": {
+              "anyOf": [
+                { "enum": ["Name", "Application", "Environment", "Owner", "ManagedBy", "GeneratedBy", "A2IJobId", "A2IResourceId"] },
+                { "pattern": "^aws:" }
+              ]
+            }
+          },
+          "additionalProperties": { "type": "string", "minLength": 1, "maxLength": 256 }
         }
       }
     },

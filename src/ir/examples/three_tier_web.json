@@ -16,7 +16,7 @@
     "name_prefix": "shop",
     "availability_zones": 2,
     "owner": "platform-team",
-    "tags": { "Application": "shop", "CostCenter": "1234" }
+    "tags": { "CostCenter": "1234" }
   },
   "groups": [
     { "id": "aws_region", "kind": "region", "label": "us-east-1" },

@@ -69,6 +69,19 @@ def test_inferred_resource_with_rationale_is_valid(validator, example):
     assert _errors(validator, ir) == []
 
 
+@pytest.mark.parametrize("prefix", ["ab", "shop", "shop-web", "a1-b2-c3-d4e", "abcdefghijkl"])
+def test_valid_name_prefixes(validator, example, prefix):
+    ir = copy.deepcopy(example)
+    ir["deployment"]["name_prefix"] = prefix
+    assert _errors(validator, ir) == []
+
+
+def test_extra_custom_tags_are_allowed(validator, example):
+    ir = copy.deepcopy(example)
+    ir["deployment"]["tags"].update({"DataClassification": "internal", "Team": "payments"})
+    assert _errors(validator, ir) == []
+
+
 # Each case mutates a copy of the valid example; the schema must reject it.
 INVALID_CASES = {
     "bad_cidr": lambda ir: _resource(ir, "vpc_main")["properties"].update(cidr="10.0.0.0/33"),
@@ -84,6 +97,13 @@ INVALID_CASES = {
     "wrong_ir_version": lambda ir: ir.update(ir_version="2.0"),
     "invalid_environment": lambda ir: ir["deployment"].update(environment="staging"),
     "empty_resources": lambda ir: ir.update(resources=[]),
+    "name_prefix_too_long": lambda ir: ir["deployment"].update(name_prefix="customerportal"),
+    "name_prefix_double_hyphen": lambda ir: ir["deployment"].update(name_prefix="shop--web"),
+    "name_prefix_trailing_hyphen": lambda ir: ir["deployment"].update(name_prefix="shop-"),
+    "missing_owner": lambda ir: ir["deployment"].pop("owner"),
+    "missing_cost_center_tag": lambda ir: ir["deployment"]["tags"].pop("CostCenter"),
+    "reserved_tag_key": lambda ir: ir["deployment"]["tags"].update(ManagedBy="console"),
+    "aws_prefixed_tag_key": lambda ir: ir["deployment"]["tags"].update({"aws:foo": "x"}),
     "unexpected_top_level_field": lambda ir: ir.update(terraform="resource {}"),
     "sg_rule_with_both_sources": lambda ir: ir["resources"].append(
         {
