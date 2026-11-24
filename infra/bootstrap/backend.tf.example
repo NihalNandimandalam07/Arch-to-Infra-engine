@@ -1,0 +1,4 @@
+# Enabled after the first apply (see README.md). Settings come from backend.hcl.
+terraform {
+  backend "s3" {}
+}

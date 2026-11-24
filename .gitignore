@@ -13,6 +13,13 @@ tfplan
 crash.log
 .terraform.lock.hcl.bak
 
+# Account-specific Terraform inputs (commit the *.example templates instead)
+*.tfvars
+!*.tfvars.example
+backend.hcl
+# Bootstrap backend is enabled per account after its first apply (see infra/bootstrap/README.md)
+infra/bootstrap/backend.tf
+
 # Local
 .env
 .DS_Store
