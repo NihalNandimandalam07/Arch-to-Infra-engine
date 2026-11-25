@@ -74,7 +74,7 @@ The table below maps each box in the reference diagram to what we build.
 | Validate Terraform | CodeBuild project (plan, OPA/conftest, tflint, checkov) | `src/validation/buildspec.yml` |
 | DynamoDB | `jobs` table | `infra/storage.tf` |
 | SNS | `review-and-approval` topic, with email subscriptions | `infra/notifications.tf` |
-| S3 (Object Lock) | Evidence bucket (governance mode in the PoC) | `infra/storage.tf` |
+| S3 (Object Lock) | Evidence bucket (governance mode in the PoC), written only by the evidence recorder (§13.1) | `infra/storage.tf`, `src/evidence/` |
 | OPA Policy Library | Rego plus human-readable metadata, shared by the Standards agent and CodeBuild | `policies/` |
 | Bedrock Guardrails | Prompt-attack filter on text extracted from diagrams | `infra/guardrails.tf` |
 
@@ -111,7 +111,7 @@ stateDiagram-v2
 | **Validate Terraform** | CodeBuild `.sync` | Runs `init`, `fmt -check`, `validate`, `plan -out`, `show -json`, then `conftest` (OPA) on the plan JSON, then `tflint` and `checkov`. | `validation/attempt-<n>/report.json`, `plan.json`, `plan.txt` |
 | **Repair choice** | Choice | On failure with attempt < 3, loops back to the agents in `repair` mode with a normalized error list. Otherwise moves on to *NeedsAttention*. | |
 | **Human Approval** | Lambda + `.waitForTaskToken` | Sends the approval email with a summary and links. | (waits) |
-| **Record Decision** | Lambda | Writes the decision JSON (Object Lock) and updates DynamoDB. | `approval/decision.json` |
+| **Record Decision** | Lambda | Writes the decision JSON, which includes the SHA-256 of the approved Terraform zip, and updates DynamoDB. Then calls the evidence recorder for the `decision` checkpoint (§13.1). | `approval/decision.json` |
 
 Job status in DynamoDB moves through: `CREATED → INGESTED → EXTRACTED → AWAITING_REVIEW → GENERATING → VALIDATING → AWAITING_APPROVAL → APPROVED | REJECTED | NEEDS_ATTENTION | FAILED`.
 
@@ -301,7 +301,7 @@ Repair rules:
 | Invented resources or modules | Registry-only tools, the registry gate in the Package step, and module input schemas. |
 | Insecure defaults | Secure-by-default modules, Standards constraints, then OPA, checkov and tflint at validation. |
 | Over-privileged components | One IAM role per Lambda, AgentCore Runtime and CodeBuild, scoped to the needed prefixes and actions. The plan role is read-only. Nothing in the engine has write access to target infrastructure. |
-| Tampering with evidence | Evidence bucket with versioning and Object Lock (governance, 90 days in the PoC). Manifest hashes. Decision records. |
+| Tampering with evidence | Evidence bucket with versioning and Object Lock (governance, 90 days in the PoC). A single writer role, conditional (no-overwrite) writes, SHA-256-verified copies, per-checkpoint manifests, and a decision record bound to the hash of the approved code (§13.1). |
 | Data at rest / in transit | SSE-KMS (one engine CMK) on S3, DynamoDB, SNS and logs. TLS only (`aws:SecureTransport` deny). |
 | Email link abuse | Single-use, hashed, expiring tokens. Decisions only on POST. Approver identity recorded. |
 | Malicious uploads | Magic-byte checks, size limits, PDF rendered to an image in an isolated Lambda, and only rendered PNGs sent to the model. |
@@ -322,11 +322,52 @@ Repair rules:
 
 | Bucket | Contents | Settings |
 |---|---|---|
-| `a2i-artifacts-<acct>` | Working files per job | Versioned, KMS |
-| `a2i-evidence-<acct>` | Copies of IR, plan, reports, Terraform zip and decision | Object Lock |
-| `a2i-registry-<acct>` | Module zips, `index.json`, KB source docs, policy bundle | Versioned |
+| `a2i-artifacts-<acct>-<region>` | Working files per job | Versioned, engine KMS key; current files expire after 90 days, old versions after 30 |
+| `a2i-evidence-<acct>-<region>` | Sealed copies of the diagram, IR, plan, reports, Terraform zip and decision (§13.1) | Versioned, engine KMS key, Object Lock (GOVERNANCE, 90 days); nothing expires |
+| `a2i-registry-<acct>-<region>` | Module zips, `index.json`, KB source docs, policy bundle | Versioned, engine KMS key |
 
 The engine's own Terraform state uses an S3 backend with native locking (`use_lockfile = true`) in a separate, manually bootstrapped state bucket.
+
+### 13.1 Evidence recording
+
+The evidence bucket holds the trusted, unalterable record of each job. The artifacts bucket is the engine's workspace, where files get overwritten (e.g. on each repair attempt) and eventually expire. Evidence is a **sealed copy taken at each checkpoint**.
+
+**Mechanism.** A single Lambda, `a2i-record-evidence-fn`, is called by Step Functions at each checkpoint. For each file it:
+1. **Copies** it server-side from `artifacts/jobs/<job_id>/…` to `evidence/jobs/<job_id>/…` with S3 `CopyObject`. Data never leaves S3.
+2. **Writes only if absent:** a conditional write (`If-None-Match: *`). A second attempt to record the same file fails instead of creating a new version.
+3. **Verifies integrity:** requests an S3 SHA-256 checksum on the copy and compares it with the source's. On mismatch, the job fails.
+4. **Appends to a manifest,** `evidence/jobs/<job_id>/manifest/<seq>-<checkpoint>.json`: one file per checkpoint, each with file key, SHA-256, size, checkpoint, timestamp and the Step Functions execution ARN. Each entry is a new object, because a single growing manifest can't be rewritten under Object Lock.
+
+The bucket's default retention locks each object the moment it is written. No per-object lock call is needed.
+
+**Checkpoints:**
+
+| Checkpoint | Workflow state | Evidence recorded |
+|---|---|---|
+| `intake` | after Ingest & Preprocess | original diagram, normalized PNG, deployment parameters |
+| `review` | after Review IR is submitted | `ir/extracted.json`, `ir/reviewed.json`, the reviewer's answers and identity |
+| `validation` | after Validate Terraform passes | `plan.json`, `plan.txt`, normalized validation report, OPA/checkov/tflint raw outputs |
+| `decision` | Record Decision | Terraform zip and its file-hash manifest, `analysis/*.json`, `approval/decision.json` |
+
+For failed jobs (`REJECTED`, `NEEDS_ATTENTION`), the last validation report and the reason are recorded under a `closure` checkpoint, so failed jobs leave a trail too.
+
+**Binding the approval to the code.** `decision.json` contains the SHA-256 of the Terraform zip the approver was shown. Approval therefore covers exactly those bytes, and any later change to the code would not match the approved hash.
+
+**Safeguards:**
+
+| Safeguard | How |
+|---|---|
+| Single writer | Only the `a2i-record-evidence-fn` role has `s3:PutObject` on the evidence bucket. The bucket policy denies `PutObject` to every other principal. Other components get read access at most. |
+| No overwrite | Conditional writes, plus versioning: any later version would leave the original version locked and visible. |
+| No deletion | Object Lock default retention. GOVERNANCE (PoC) can be bypassed only by principals with `s3:BypassGovernanceRetention`. COMPLIANCE (production) cannot be bypassed by anyone. |
+| Same encryption | Both buckets use the engine KMS key, so copies satisfy the bucket's encryption-key policy without re-encryption. |
+| Traceability | Every generated AWS resource carries `A2IJobId` (§16.2), which points to `evidence/jobs/<job_id>/`. |
+
+**Why not S3 replication?** Replication copies every object, including temporary files and failed attempts. It runs in the background, so a later step couldn't be sure the evidence exists yet, and it can't write manifests or check checksums. Explicit copies at checkpoints are selective, synchronous and verifiable.
+
+**When it is built:**
+- the `intake` and `review` checkpoints with Milestone 1 (Weeks 1–2);
+- `validation`, `decision` and `closure` with the approval flow (Week 5).
 
 ---
 
@@ -342,6 +383,7 @@ src/
   tools/               7 deterministic generation tools + Jinja2 templates
   validation/          CodeBuild buildspec + report normalizer
   notifications/       Email rendering, approval page
+  evidence/            Evidence recorder Lambda (checkpoint copies + manifests)
 modules/               Approved modules (each with module.json)
 policies/              OPA/Rego + metadata + checkov config
 config/                naming.yaml (naming and tagging convention)
